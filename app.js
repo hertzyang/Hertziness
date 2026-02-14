@@ -1056,11 +1056,24 @@ async function startRecording() {
     const analysisInterval = Math.max(100, Math.min(5000, intervalSeconds * 1000)); // 限制在 0.1-5 秒之间
 
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    // 使用设备原生采样率采集，避免输入流与 AudioContext 采样率不一致导致的连接失败。
-    // 后续在模型输入阶段统一重采样到 TARGET_SAMPLE_RATE。
-    audioContext = new AudioContext();
-    captureSampleRate = audioContext.sampleRate || TARGET_SAMPLE_RATE;
-    microphone = audioContext.createMediaStreamSource(mediaStream);
+    // 优先使用目标采样率；若不支持则回退到设备原生采样率。
+    let contextInitError = null;
+    try {
+      audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+      captureSampleRate = audioContext.sampleRate || TARGET_SAMPLE_RATE;
+      microphone = audioContext.createMediaStreamSource(mediaStream);
+    } catch (error) {
+      contextInitError = error;
+      if (audioContext && audioContext.state !== 'closed') {
+        await audioContext.close().catch(() => {});
+      }
+      audioContext = new AudioContext();
+      captureSampleRate = audioContext.sampleRate || TARGET_SAMPLE_RATE;
+      microphone = audioContext.createMediaStreamSource(mediaStream);
+    }
+    if (contextInitError && window.Sentry && contextInitError instanceof Error) {
+      window.Sentry.captureException(contextInitError);
+    }
 
     // 使用 ScriptProcessor 或 AudioWorklet 来收集音频数据
     scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
