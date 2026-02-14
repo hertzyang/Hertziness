@@ -36,6 +36,7 @@ let scriptProcessor = null;
 let mediaStream = null;
 let isRecording = false;
 let audioChunks = [];
+let captureSampleRate = TARGET_SAMPLE_RATE;
 let recordInterval = null;
 const DEFAULT_ANALYSIS_INTERVAL = 600;
 const PERF_WARNING_TRIGGER_COUNT = 4;
@@ -1055,14 +1056,17 @@ async function startRecording() {
     const analysisInterval = Math.max(100, Math.min(5000, intervalSeconds * 1000)); // 限制在 0.1-5 秒之间
 
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+    // 使用设备原生采样率采集，避免输入流与 AudioContext 采样率不一致导致的连接失败。
+    // 后续在模型输入阶段统一重采样到 TARGET_SAMPLE_RATE。
+    audioContext = new AudioContext();
+    captureSampleRate = audioContext.sampleRate || TARGET_SAMPLE_RATE;
     microphone = audioContext.createMediaStreamSource(mediaStream);
 
     // 使用 ScriptProcessor 或 AudioWorklet 来收集音频数据
     scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
 
     audioChunks = [];
-    const samplesNeeded = TARGET_SAMPLE_RATE * 3;
+    const samplesNeeded = Math.floor(captureSampleRate * 3);
     const maxChunks = Math.ceil(samplesNeeded / 4096);
 
     scriptProcessor.onaudioprocess = (e) => {
@@ -1099,7 +1103,7 @@ async function startRecording() {
       }
 
       // 创建 AudioBuffer 用于分析
-      const audioBufferForAnalysis = audioContext.createBuffer(1, offset, TARGET_SAMPLE_RATE);
+      const audioBufferForAnalysis = audioContext.createBuffer(1, offset, captureSampleRate);
       audioBufferForAnalysis.getChannelData(0).set(combined.subarray(0, offset));
 
       // 静音检测（使用 RMS）
@@ -1116,7 +1120,7 @@ async function startRecording() {
           updateChart(scores.male, scores.female, timeIndex);
         }
 
-        const f0 = detectF0(waveformForAnalysis, TARGET_SAMPLE_RATE);
+        const f0 = detectF0(waveformForAnalysis, captureSampleRate);
         updateF0Chart(f0, timeIndex);
       } else {
         // 静音时添加空数据点
@@ -1172,6 +1176,7 @@ function stopRecording() {
     mediaStream.getTracks().forEach(track => track.stop());
     mediaStream = null;
   }
+  captureSampleRate = TARGET_SAMPLE_RATE;
   audioChunks = [];
 
   recordBtn.textContent = '开始录音';
