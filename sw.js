@@ -1,4 +1,5 @@
 const APP_CACHE = `app-cache`;
+const SHELL_PATHS = ['/', '/app.js', '/style.css'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(self.skipWaiting());
@@ -12,9 +13,66 @@ self.addEventListener('activate', (event) => {
         .filter((key) => key !== APP_CACHE)
         .map((key) => caches.delete(key))
     );
+    const cache = await caches.open(APP_CACHE);
+    await refreshShellBundle(cache);
     await self.clients.claim();
   })());
 });
+
+function toAbsoluteUrl(path) {
+  return new URL(path, self.location.origin).toString();
+}
+
+async function fetchShellBundle() {
+  const responses = await Promise.all(
+    SHELL_PATHS.map((path) => fetch(toAbsoluteUrl(path), { cache: 'no-store' }))
+  );
+
+  if (!responses.every((response) => response && response.ok)) {
+    throw new Error('shell bundle fetch failed');
+  }
+
+  return responses;
+}
+
+async function writeShellBundle(cache, responses) {
+  await Promise.all(
+    SHELL_PATHS.map((path, index) => cache.put(toAbsoluteUrl(path), responses[index].clone()))
+  );
+}
+
+async function refreshShellBundle(cache) {
+  try {
+    const responses = await fetchShellBundle();
+    await writeShellBundle(cache, responses);
+    return { ok: true, rootResponse: responses[0] };
+  } catch (error) {
+    return { ok: false, rootResponse: null };
+  }
+}
+
+async function handleRootRequest(event) {
+  const cache = await caches.open(APP_CACHE);
+  const cachedRoot = await cache.match(toAbsoluteUrl('/'));
+
+  if (!cachedRoot) {
+    const firstLoad = await refreshShellBundle(cache);
+    if (firstLoad.ok && firstLoad.rootResponse) {
+      return firstLoad.rootResponse;
+    }
+    return fetch(toAbsoluteUrl('/'));
+  }
+
+  event.waitUntil(refreshShellBundle(cache));
+  return cachedRoot;
+}
+
+async function serveNoCacheWrite(request) {
+  const cache = await caches.open(APP_CACHE);
+  const cached = await cache.match(request);
+  if (cached) return cached;
+  return fetch(request);
+}
 
 async function staleWhileRevalidate(request, cacheName, options = {}) {
   const { skipRevalidateIfCached = false } = options;
@@ -51,9 +109,19 @@ self.addEventListener('fetch', (event) => {
   if (!request.url.startsWith('http://') && !request.url.startsWith('https://')) return;
 
   const url = new URL(request.url);
+
+  if (url.origin === self.location.origin && (url.pathname === '/' || url.pathname === '/index.html')) {
+    event.respondWith(handleRootRequest(event));
+    return;
+  }
+
+  if (url.origin === self.location.origin && (url.pathname === '/app.js' || url.pathname === '/style.css')) {
+    event.respondWith(serveNoCacheWrite(request));
+    return;
+  }
+
   const skipRevalidateIfCached =
-  //  (url.pathname.includes('.gz.') || url.pathname.endsWith('.gz') || url.pathname.endsWith('.wasm'));
-  (url.pathname.includes('model.onnx.gz.'));
+    (url.pathname.includes('model.onnx.gz.'));
 
   event.respondWith(staleWhileRevalidate(request, APP_CACHE, { skipRevalidateIfCached }));
 });
